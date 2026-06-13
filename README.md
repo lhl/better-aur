@@ -4,6 +4,36 @@ A sketch for a safer, more transparent, and more democratic community package re
 
 This document is intentionally a working draft. The goal is to iterate on the model, identify tradeoffs, and eventually turn the design into concrete specs and prototypes.
 
+## Table of Contents
+
+- [Problem Statement](#problem-statement)
+- [Core Principle](#core-principle)
+- [Current System Snapshot](#current-system-snapshot)
+- [Prior Art and Features to Adopt](#prior-art-and-features-to-adopt)
+- [Goals](#goals)
+- [Threat Model](#threat-model)
+- [Design Overview](#design-overview)
+- [Package Model](#package-model)
+- [Namespace Stewardship and Update Proposals](#namespace-stewardship-and-update-proposals)
+- [Maintainership Model](#maintainership-model)
+- [Identity and Account Security](#identity-and-account-security)
+- [Reputation Model](#reputation-model)
+- [Web of Trust](#web-of-trust)
+- [Recipe Format](#recipe-format)
+- [Source, Namespace, and Dependency Provenance](#source-namespace-and-dependency-provenance)
+- [Static and Dynamic Analysis](#static-analysis)
+- [Global Indicators and Campaign Detection](#global-indicators-denylists-and-campaign-detection)
+- [Update Delta Taxonomy](#update-delta-taxonomy)
+- [Risk Classification](#risk-classification)
+- [Review Workflow](#review-workflow)
+- [Sandboxed Builds](#sandboxed-builds)
+- [Build Attestations and Reproducibility](#build-attestations-and-reproducibility)
+- [Install Hooks](#install-hooks)
+- [Client Policy](#client-policy)
+- [Governance and Emergency Response](#governance)
+- [Minimum Viable Version](#minimum-viable-version)
+- [Open Questions](#open-questions)
+
 ## Problem Statement
 
 Community package repositories are useful because they make it easy for users to share build recipes for software that is not available in official distribution repositories.
@@ -95,6 +125,22 @@ The state of the art is not one system. It is a collection of lessons spread acr
 - Flathub shows that user-facing permissions and app verification can make trust more understandable.
 
 The proposed system should combine these ideas rather than choosing between them: AUR-like openness, Fedora/openSUSE-style review workflows, Nix/Guix-style sandboxed builds, Go/Sigstore-style transparency, PyPI/npm-style OIDC publishing, and Flathub-style user-visible risk metadata.
+
+### Integrated Best-of-Breed Architecture
+
+A hardened community package system should be built as a set of cooperating layers:
+
+1. **Identity layer** — MFA/WebAuthn, OIDC Trusted Publishing, scoped short-lived tokens, signed commits, and account recovery controls.
+2. **Namespace layer** — package names are stewarded community namespaces with maintainer sets, contributor proposals, stale-maintainer escalation, and orphan-adoption review.
+3. **Recipe layer** — declarative package metadata, explicit capabilities, pinned sources, dependency manifests, and semantic diffs.
+4. **Analysis layer** — static analysis, sandboxed dynamic analysis, dependency graph analysis, install-hook simulation, artifact diffing, and campaign correlation.
+5. **Review layer** — risk-based confirmations, independent reviewer diversity, provenance checks, and provenpackager-style non-owner fixes.
+6. **Build layer** — disposable builders, reproducibility checks, N-of-M attestations, binary cache signatures, and local sandbox fallback.
+7. **Metadata layer** — TUF-style signed metadata, threshold signatures, expiry, rollback protection, and append-only transparency logs.
+8. **Client policy layer** — helper warnings, deny rules, enterprise policies, local trust roots, and visible package risk/reputation state.
+9. **Response layer** — global malicious-indicator feeds, bad-actor quarantine, package freezes, advisories, rollback guidance, and user notification.
+
+This architecture explicitly avoids one brittle trust decision. A package update is accepted only when the right combination of identity, provenance, analysis, review, build evidence, and policy checks agree for that update's risk level.
 
 ## Goals
 
@@ -299,6 +345,21 @@ Proposed stale-update workflow:
 
 This avoids the failure mode where one inactive account blocks all legitimate maintenance while still preventing arbitrary takeover.
 
+### Non-Owner Fixes and Proven Maintainers
+
+The system should borrow from Fedora's provenpackager idea and openSUSE's submit-request model: trusted contributors should be able to propose or land narrowly scoped fixes for packages they do not own, without requiring full takeover.
+
+Rules:
+
+- Non-owner fixes should start as proposals with full analysis and visible diffs.
+- Low-risk routine version bumps can be merged by proven maintainers after maintainer timeout.
+- Security fixes can be escalated through security responders.
+- High-risk behavior changes still require normal high-risk review.
+- Landing a non-owner fix does not automatically grant long-term maintainer control.
+- Repeated high-quality non-owner fixes can nominate a contributor for co-maintainer status.
+
+This creates responsiveness without converting every maintenance problem into an ownership transfer.
+
 ## Identity and Account Security
 
 Accounts should be more than email plus SSH key. SSH keys may be acceptable for Git transport, but they should not be the whole authorization model.
@@ -360,6 +421,35 @@ If tokens exist, they should be:
 - Unable to bypass high-risk review.
 
 No token should grant broad account-level authority by default.
+
+### Signed Metadata, Transparency, and Rollback Protection
+
+The repository should have signed metadata and an append-only transparency log, not only signed Git commits.
+
+Recommended metadata protections:
+
+- TUF-style root metadata with offline root keys.
+- Threshold signatures for repository-wide trust roots.
+- Delegated signing roles for package namespaces, ecosystems, build attestations, and security advisories.
+- Metadata expiry to prevent freeze attacks.
+- Version counters and snapshot metadata to prevent rollback attacks.
+- Signed malicious-indicator feeds and revocation records.
+- Public append-only transparency log for package events.
+
+The transparency log should record:
+
+- Package creation.
+- Maintainer additions and removals.
+- Adoption proposals and approvals.
+- Recipe revisions.
+- Risk classifications.
+- Review approvals.
+- Build attestations.
+- Published artifacts.
+- Indicator matches.
+- Quarantines, freezes, and reversions.
+
+Clients should be able to verify not just "is this artifact signed?" but also "is this the current signed view of the package according to the repository metadata, and is there evidence of suspicious history?"
 
 Optional stronger controls for high-impact packages:
 
@@ -601,6 +691,38 @@ Examples:
 - Browser extension installation.
 - Systemd unit installation.
 - Setuid files.
+
+## Source, Namespace, and Dependency Provenance
+
+The recipe should make provenance explicit enough for automation to reason about it.
+
+Source metadata should include:
+
+- Upstream project identity.
+- Canonical source URL pattern.
+- Expected hosting provider or domain.
+- Immutable source identifier where possible, such as commit SHA or signed release tag.
+- Source hash.
+- Upstream signature or attestation if available.
+- Whether generated archives are known to be stable or mutable.
+
+Namespace metadata should distinguish:
+
+- Package namespace in this repository.
+- Upstream project namespace.
+- Language ecosystem namespace, if any.
+- Organization or domain verification, if available.
+- Forks, replacements, and abandoned upstream continuations.
+
+Dependency metadata should avoid hidden resolver behavior:
+
+- Dynamic dependency resolution should be disabled by default during build.
+- Language ecosystem dependencies should come from declared manifests and lockfiles.
+- New lockfiles or large dependency graph changes should be reviewed.
+- Dependencies should have their own reputation, provenance, and indicator checks where possible.
+- Cross-ecosystem dependency additions should be high risk unless clearly justified.
+
+A source hash verifies bytes, not intent. Provenance metadata helps decide whether those bytes came from the expected party through the expected path.
 
 ## Static Analysis
 
@@ -985,6 +1107,18 @@ Default build restrictions:
 
 Sandboxing should be preventative, not only diagnostic. Even if analysis misses malicious behavior, the default sandbox should prevent the build from reading real user secrets or modifying the host.
 
+### Central Builders and Local Builders
+
+The system should support both central analysis builders and local user builds.
+
+- Central builders provide consistent automated analysis, public logs, artifact hashes, and reproducibility checks.
+- Independent builders provide diversity and reduce trust in a single build farm.
+- Local builders give users control but should use the same sandbox policy and metadata checks.
+- Binary caches may be offered, but clients should verify signatures, provenance, and policy before installation.
+- A locally built package should still inherit repository risk metadata, indicator checks, and maintainer-history warnings.
+
+This combines Nix/Guix-style build isolation with a community-repository workflow while avoiding a hard dependency on either central binaries or unsafe local builds.
+
 Possible enforcement tools:
 
 - Containers.
@@ -1016,6 +1150,20 @@ Users could require:
 - N-of-M independent matching builds.
 - A trusted builder signature.
 - Reproducibility before install.
+
+### Attestation Levels
+
+Attestations should have levels so clients can enforce policy without reading every log manually.
+
+Example levels:
+
+- **Observed** — a sandboxed build completed and logs are available.
+- **Provenance-attested** — the build is tied to OIDC identity, source revision, recipe revision, and builder identity.
+- **Reproducible-once** — one independent builder produced the same output.
+- **Reproducible-N** — multiple independent builders produced matching outputs.
+- **Policy-clean** — the build passed static analysis, sandbox policy, source checks, dependency checks, and install-hook simulation for its declared risk tier.
+
+Higher-risk updates should require higher attestation levels.
 
 ## Install Hooks
 
@@ -1151,6 +1299,9 @@ A practical first version could implement:
 13. Helper warnings for recent adoption, package reputation changes, new hooks, source changes, dynamic dependency installers, and indicator matches.
 14. Sandboxed local builds without access to the user's home directory.
 15. High-risk update review queue.
+16. OIDC Trusted Publishing for automated package submissions and build attestations.
+17. TUF-style signed repository metadata with expiry and rollback protection.
+18. Append-only transparency log for package events and trust changes.
 
 ## Open Questions
 
