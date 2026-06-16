@@ -29,6 +29,8 @@ This document is intentionally a working draft. The goal is to iterate on the mo
 - [Global Indicators and Campaign Detection](#global-indicators-denylists-and-campaign-detection)
 - [Update Delta Taxonomy](#update-delta-taxonomy)
 - [Risk Classification](#risk-classification)
+- [Ownership Transition vs Content Change](#ownership-transition-vs-content-change)
+- [Default-Deny Policy and Hard Blocks](#default-deny-policy-and-hard-blocks)
 - [Automation and the Labor Model](#automation-and-the-labor-model)
 - [Review Workflow](#review-workflow)
 - [Sandboxed Builds](#sandboxed-builds)
@@ -39,6 +41,9 @@ This document is intentionally a working draft. The goal is to iterate on the mo
 - [Adoption Path and Compatibility](#adoption-path-and-compatibility)
 - [Governance and Emergency Response](#governance)
 - [Limitations and Residual Risk](#limitations-and-residual-risk)
+- [Core Object Model](#core-object-model)
+- [Worked Policy Examples](#worked-policy-examples)
+- [Social and Governance Risks](#social-and-governance-risks)
 - [Minimum Viable Version](#minimum-viable-version)
 - [Open Questions](#open-questions)
 
@@ -81,6 +86,36 @@ The campaign maps cleanly onto the mechanisms in this document, but it is worth 
 | eBPF rootkit installed at install time | Not contained by the build sandbox — it runs on the real system | Install-hook simulation; critical-risk gating; client warning |
 
 The honest conclusion: a build sandbox with default-deny egress and no real secrets neutralizes the **entire build-time portion** of Atomic Arch — credential theft and payload fetch — regardless of how the command is obfuscated, because containment acts at the network and filesystem layer rather than the lexical layer. It does **not** neutralize a malicious install hook that runs on the user's real system, a backdoor compiled into the shipped artifact, or malicious runtime behavior of the installed software. Those residual classes are why the rest of this document exists. See [What Actually Carries the Weight](#what-actually-carries-the-weight).
+
+### How this design defends against it
+
+The point of mapping the campaign so closely is to be specific about *which guard stops which step*, and equally specific about what remains residual. The outcomes below distinguish four cases: **prevented** (structurally impossible), **contained** (can run but cannot cause harm), **blocked by default** (refused unless explicitly declared and independently reviewed), and **residual** (not fully solved; blast radius reduced only).
+
+| Attack step (as observed) | Primary guard in this design | Outcome |
+| --- | --- | --- |
+| Adopt an orphan, then ship a behavior-changing update as/after the adoption | Ownership transition and content change are separate transactions; the first post-adoption update may only be a strict routine version bump | Blocked by default |
+| Add `npm install atomic-lockfile` to the recipe | A cross-ecosystem installer in a package with no such history is a critical capability diff | Blocked by default |
+| Fetch the payload from the npm registry during build | Default-deny build egress + fixed-output fetch (network only in a hash-pinned phase) | Prevented |
+| Execute the payload via the npm `preinstall` lifecycle hook | `language_sources` model with lifecycle scripts disabled by default; pinned, integrity-checked dependencies | Prevented (re-enabling scripts forces review) |
+| Steal `~/.ssh`, browser, and token-store credentials during build | Build sandbox with no real `$HOME` and no secrets present | Contained |
+| Add a new `.install` hook | New or changed install hook is critical-tier and blocked by default; declarative install actions cover common cases; arbitrary hooks require elevated review and simulation | Blocked by default |
+| Install an eBPF rootkit at install time, as root | Install hooks run on the user's real system, not the build sandbox; eBPF/DKMS/kernel-module/setuid are hard-blocked-by-default capabilities requiring elevated review | Blocked by default (not contained once it runs) |
+| Spoof git commit metadata to look like a trusted committer | The signed server event log is authority; Git author/committer fields are treated only as evidence | Prevented (for the trust decision) |
+
+Escalations and variants the same guards cover without new rules:
+
+- **Swapping `npm` for `bun`, `pip`, `cargo`, `go install`, or `curl | sh`.** None of these are build commands in this model; all are undeclared source acquisition, and all are refused by default-deny egress regardless of the binary's name. The second wave's `bun install js-digest` fails at the same network boundary as the first wave's `npm install`.
+- **Lexical obfuscation (hex escapes, string splitting, mixed quoting).** Irrelevant to a guard that acts at the network and syscall layer rather than by matching text.
+- **Decoy dependencies (`minimist`, `chalk`) for plausibility.** The capability diff flags the *new ecosystem relationship*, not the specific package names, so plausible padding does not lower the tier.
+- **Bulk campaigns across hundreds or thousands of packages.** Bulk-adoption and update rate limits, the signed indicator feed, and log watchers (for example, "many packages adding the same new dependency") turn one detection into ecosystem-wide quarantine.
+
+What remains **residual**, stated plainly:
+
+- **A backdoor compiled into upstream source or a release tarball.** Nothing above stops a malicious artifact that builds cleanly. Source-tree delta, build-from-VCS, and tarball-vs-VCS diffing narrow this gap but do not close it (see [Limitations and Residual Risk](#limitations-and-residual-risk)).
+- **A patient adopter** who maintains a package benignly through cooldown, then defects with a routine-looking change. Containment limits what that change can do during build and instant inversion limits how long it persists, but the design does not claim to prevent it.
+- **Malice in the installed software at runtime.** Out of scope of any packaging system; downstream application sandboxing is the mitigation.
+
+In short, the build-time and adoption-time portions of Atomic Arch — where the entire observed campaign lived — move from "succeeds silently" to "prevented or forced into independent review." The parts this design cannot stop are the parts no build-time control can, and the document is explicit about them rather than implying otherwise.
 
 ## Core Principle
 
@@ -188,6 +223,10 @@ Several existing systems implement pieces of this design closely enough that the
 - **OpenSSF Scorecard** — objective repository-health signals (branch protection, signed releases, CI, dependency hygiene) usable to seed *package* reputation without a popularity contest.
 - **GUAC / OSV / deps.dev** — ecosystem-wide graphs linking provenance, vulnerabilities, and dependency metadata; prior art for campaign correlation rather than a bespoke engine.
 - **Nix fixed-output derivations and `nix store diff-closures`** — the model for hash-pinned network access during build and for detecting dependency-surface changes.
+- **Nix build sandboxing** — isolated PID, mount, network, IPC, and UTS namespaces exposing only declared dependencies; the concrete reference for build-time isolation.
+- **Provenance is not safety (PyPI/npm Trusted Publishing).** OIDC and short-lived tokens improve *authentication* and record where and how a build happened; they assert nothing about whether the code is malicious. Adopt the authentication model, but never let provenance stand in for a safety verdict.
+- **OpenSSF Malicious Packages / OSV** — the signed indicator feed should interoperate with OSV-style malicious-package reports so detections are consumable across tools rather than siloed.
+- **openSUSE Factory staging and TUF roles** — staging projects with automated checks and layered review are a model for the review pipeline; TUF's snapshot role (anti mix-and-match) and timestamp role (anti replay of stale metadata) are the specific properties to inherit, not just "TUF" generically.
 
 Things these systems often do not solve completely:
 
@@ -564,6 +603,24 @@ Reputation should exist for users, packages, and the relationship between a user
 
 Reputation is a first-class, user-facing part of this system, but its job must be stated precisely so it is not mistaken for the safety floor. Objective, mechanical signals — delta class, sandbox result, reproducibility, source-tree delta, and indicator matches — decide whether a change is *safe to apply*. Reputation decides how much human scrutiny a change deserves, who is eligible to review it, how a package's history and standing are explained to users, and how fast the system reacts when something goes wrong. In other words, reputation buys *speed and legibility within a risk tier*; it must never lower a risk tier or substitute for a safety check. A compromised high-reputation account (see [Instant Trust Inversion](#instant-trust-inversion)) is exactly why reputation can demote fast but must not promote past the objective gates.
 
+As a hard rule, reputation is expressed as **capability grants**, never as a single trust score. The system should never answer "is this account trusted?"; it answers "what is this account allowed to do, for which scope, at which risk tier?":
+
+```yaml
+capabilities:
+  package/example:
+    merge_low_risk: true
+    merge_medium_risk: false
+    approve_install_hook: false
+    approve_adoption: false
+  ecosystem/rust:
+    review_dependency_delta: true
+    review_binary_blob: false
+  global:
+    security_responder: false
+```
+
+Capabilities are scoped, auditable, expirable, and revocable, and they bound the blast radius of a compromised account: a respected maintainer's stolen credentials still cannot approve an install hook or an adoption they were never granted. This is the concrete form of the rule that reputation buys speed within a tier but never lowers the objective safety floor.
+
 A good reputation system should not ask only "is this account trusted?" It should ask:
 
 - Trusted to do what?
@@ -801,6 +858,59 @@ Examples:
 The manifest is not documentation; it is an enforced allowlist. The build sandbox treats every field as a capability boundary: a build declared `network: false` runs with egress denied at the network layer, and any undeclared-but-attempted capability — network access, `$HOME` access, a package-manager invocation — is a hard build failure recorded in the build attestation. A declaration the sandbox does not enforce would be worse than nothing, because it would offer false assurance. The recipe manifest (what a package *says* it needs) and the build sandbox (what the package is *allowed* to do) are therefore two ends of one mechanism, not two independent layers.
 
 Network handling should follow the fixed-output model used by Nix derivations: network access is permitted only during an explicit fetch phase whose outputs are pinned by hash, and is denied during `prepare()`, `build()`, and `package()`. This makes "fetched undeclared code" structurally impossible rather than something to be detected after the fact, and it is what would have stopped the Atomic Arch `npm`/`bun install` step regardless of how the command was written.
+
+### Capability Baseline and Per-Update Capability Diff
+
+A manifest describes one revision. Security decisions are about *change*, so each package lineage also carries a **capability baseline** — the capabilities its accepted revisions have historically used:
+
+```yaml
+baseline:
+  source_domains:
+    - github.com/upstream/project
+  build_systems:
+    - cmake
+  external_package_managers: []
+  build_network: false
+  install_hooks: false
+  privileged_features: []
+```
+
+Every proposed update is then reduced to a machine-readable **capability diff** against that baseline, and the diff — not the raw PKGBUILD — is what drives classification and what reviewers and users see:
+
+```yaml
+capability_diff:
+  added:
+    external_package_managers: [npm]
+    install_hooks: [post_install]
+  risk_effect:
+    tier: critical
+    reasons:
+      - new cross-ecosystem dynamic installer
+      - new root-time install hook
+      - added after maintainer change
+```
+
+This yields stable, explainable policy rules ("a new external package manager in a package with no such history is critical") and is far easier to reason about than a textual diff. The capability diff is a field of the `RecipeRevision` and `AnalysisReport` objects (see [Core Object Model](#core-object-model)).
+
+### Nested Package Managers Are Untrusted Source Fetchers
+
+The decisive move in Atomic Arch was that the malicious behavior did not live in the recipe; the recipe merely invoked `npm`, and the payload arrived through npm's lifecycle behavior. The design therefore treats `npm install`, `pip install`, `bun install`, `cargo install`, `go install`, `curl`, `wget`, and `git clone` during build or install as **undeclared source acquisition, not build commands**.
+
+Where a package genuinely needs language-ecosystem dependencies, they must be modeled explicitly rather than resolved dynamically:
+
+```yaml
+language_sources:
+  npm:
+    registry: https://registry.npmjs.org
+    lockfile: package-lock.json
+    lifecycle_scripts: disabled
+    packages:
+      - name: minimist
+        version: 1.2.8
+        integrity: sha512-...
+```
+
+Dependencies come from a pinned registry and lockfile with integrity hashes, and lifecycle scripts are disabled by default — precisely what would have neutralized the `preinstall` hook that executed the Atomic Arch ELF. For some ecosystems, disabling lifecycle scripts will break a build. That is acceptable and intended: breakage triggers explicit review, it does not silently expand trust.
 
 ## Source, Namespace, and Dependency Provenance
 
@@ -1230,6 +1340,43 @@ Default action:
 - Require sandboxed build evidence where applicable.
 - Notify subscribers or affected users when published.
 
+## Ownership Transition vs Content Change
+
+The Atomic Arch pattern was not "adoption" and was not "a risky update" in isolation; it was **adoption immediately followed by a behavior-changing update**, riding the trust of the old package name. The structural defense is to make ownership transition and content change *separate transactions* that cannot be combined.
+
+- **The adoption event grants stewardship only.** It may request the maintainer role, prove intent, and pass cooldown — but it may not, in the same event, add or change install hooks, add dynamic installers, change the source trust boundary, or add network access.
+- **The first post-adoption update is auto-eligible only if it is a strict routine version bump.** Every other delta from a freshly adopted package requires independent review regardless of the new steward's reputation, which is necessarily low or inherited.
+
+```text
+Adoption event:
+  allowed:     request stewardship, prove intent, receive limited maintainer role
+  not allowed: add hooks, add dynamic installers, change source trust boundary, add network
+
+First post-adoption update:
+  auto-allowed only if: strict routine version bump
+  all other deltas:     independent review required
+```
+
+This turns "newly adopted" from a risk score that can be outweighed into a hard precondition: the dangerous event the campaign relied on cannot be expressed as a single transaction. It complements, rather than replaces, the adoption cooldown and the maintainer-lineage warnings.
+
+## Default-Deny Policy and Hard Blocks
+
+Some change classes should be refused by default on the server, not merely surfaced as a client-side warning. The distinction is deliberate: **warnings are for unusual but plausibly benign behavior; default-deny is for classes where the safe answer is almost always "no."**
+
+```yaml
+deny_by_default:
+  - confirmed malicious indicator match
+  - new or changed .install hook within N days of adoption
+  - dynamic package-manager invocation from an .install hook
+  - new npm/pip/bun/cargo/go install in a package with no prior ecosystem relationship
+  - build-time network access unless declared and reviewed
+  - access to the real $HOME, SSH keys, browser profiles, or credential stores
+  - new eBPF, DKMS, kernel module, setuid/setgid, systemd unit, timer, or autostart
+  - source URL moved across a trust boundary
+```
+
+Crucially, **default-deny does not mean "forbidden."** Many legitimate packages are DKMS modules, install systemd units, or genuinely need a language ecosystem. Default-deny means such a change is never auto-published: it requires the capability to be explicitly declared in the manifest, an elevated review by an appropriately scoped reviewer, and — where one exists — a safe declarative form (see [Declarative Install Actions](#declarative-install-actions)). The goal is to remove the *silent* path, not the *legitimate* path. Hard blocks should be reserved for high-confidence cases (see [Social and Governance Risks](#social-and-governance-risks)) so the default policy does not degrade into prompt fatigue.
+
 ## Automation and the Labor Model
 
 Every mechanism in this document that says "requires review" spends a scarce resource: human reviewers. The most likely way this system fails in practice is not a defeated control but an unstaffed one. Fedora and Debian run chronic, multi-year maintainer shortages at a fraction of the AUR's package count. cargo-crev built precisely the "distributed web of trust for code review" proposed here, and its limiting problem was coverage: the overwhelming majority of crates have zero reviews, so the trust graph is empty exactly where a user needs it. AUR's own response to a live ~1,500-package incident was to stop the world and clean up by hand, because there is no review capacity and no automation.
@@ -1298,6 +1445,8 @@ Suggested matrix:
 Confirmation diversity matters. A high-risk update should not be approved only by accounts from the same new trust cluster, the same organization, or the same recent vouch chain.
 
 Automation should auto-decide the common low-risk case outright (see [Automation and the Labor Model](#automation-and-the-labor-model)), because containment — not trust — is what makes that case safe. For risky deltas, automated systems should route and explain review; they should not silently grant trust on the basis of reputation alone.
+
+Review queues should be **specialized**, not a single undifferentiated backlog: cross-ecosystem (Node, Python, Rust) changes route to reviewers with that ecosystem's context, kernel/eBPF/DKMS changes route to kernel-aware reviewers, and new binary blobs route to provenance reviewers. Routing follows the capability diff, so a reviewer only ever sees changes they are scoped and equipped to judge. This keeps throughput high and avoids the "one scarce generalist reviews everything" bottleneck that pushes users to route around the system.
 
 ## Sandboxed Builds
 
@@ -1394,6 +1543,30 @@ Higher-risk updates should require higher attestation levels.
 These levels should be mapped onto SLSA build levels rather than maintained as a parallel vocabulary, so the system inherits shared, well-understood terms (provenance, hermeticity, isolated build, two-person review) instead of a bespoke ladder. "Provenance-attested" corresponds to SLSA provenance requirements; the hermetic, default-deny sandbox build corresponds to higher SLSA build levels; N-of-M reproducibility is the cross-check that makes those claims verifiable. rebuilderd is the natural reproducibility backend.
 
 ## Install Hooks
+
+### Build-Time Versus Install-Time Privilege
+
+Build scripts and install hooks are different threat classes and must be governed separately. A build can be fully sandboxed: no host secrets, no real `$HOME`, no network after the pinned fetch phase, and no root. An install hook is worse, because it runs at install or upgrade time on the user's real system, frequently as root, outside any build sandbox. The design rule is therefore:
+
+> A community package may not introduce or materially change root-time behavior without elevated review, explicit user-facing capability labels, and hook simulation.
+
+### Declarative Install Actions
+
+To keep arbitrary root shell hooks the rare exception rather than the normal escape hatch, common install-time needs should be expressible declaratively, so they can be analyzed and constrained instead of executed as opaque shell:
+
+```yaml
+install_actions:
+  systemd_units:
+    install: [example.service]
+    enable_by_default: false
+  users:
+    create:
+      - name: example
+        system: true
+        shell: /usr/bin/nologin
+```
+
+A package expressed entirely through declarative install actions needs no arbitrary hook at all. An arbitrary `.install` hook then becomes a high-signal exception that warrants the elevated review above, rather than a routine part of every package.
 
 Install hooks are privileged code and should be treated as exceptional.
 
@@ -1645,9 +1818,152 @@ This design reduces the attack surface that Atomic Arch and similar campaigns ex
 
 Stating these limits is not a concession that the design is weak. It is the basis for the priority order: invest most in the controls that hold against obfuscation and arms races (containment, reproducibility, source-tree provenance), and treat detection, reputation, and review as the layers that triage, explain, and respond rather than as the barrier.
 
+## Core Object Model
+
+To make the design implementable, it helps to name the first-class objects the system stores and signs. Everything above reduces to operations on these five types, and clients and policies are defined against them.
+
+```yaml
+PackageNamespace:
+  name: alvr
+  upstream_identity: github.com/alvr-org/ALVR
+  lineage_id: sha256:...        # stable across renames; trust attaches here, not to the name
+  current_stewards: [user:...]
+  baseline: { ... }             # capability baseline (see Recipe Format)
+  trust_state: probationary|established|frozen|quarantined
+
+RecipeRevision:
+  package: alvr
+  recipe_hash: sha256:...
+  source_hashes: [sha256:...]
+  submitted_by: user:bob
+  delta_from_previous: sha256:...
+  capability_diff: { ... }
+  requested_capabilities: [ ... ]
+
+TrustEvent:
+  type: maintainer_added|adoption_approved|review_approved|package_frozen|...
+  actor: user:...
+  subject: package:...|user:...
+  scope: low_risk_merge|install_hook_review|orphan_steward|...
+  expires: ...
+
+AnalysisReport:
+  recipe_hash: sha256:...
+  static_findings: [ ... ]
+  sandbox_findings: [ ... ]
+  dependency_findings: [ ... ]
+  risk_tier: low|medium|high|critical
+  machine_readable_reasons: [ ... ]
+
+GateRecord:
+  recipe_hash: sha256:...
+  artifact_hash: sha256:...
+  risk_tier: high
+  verdict: allow|deny|quarantine
+  required_approvals: [ ... ]
+  actual_approvals: [ ... ]
+  expires: ...
+  signature: ...
+```
+
+The client installs a revision only when it can verify a `GateRecord` whose verdict, risk tier, and approvals satisfy local policy and whose hashes match what is about to be built or fetched. This is the single verification choke point that ties recipe, analysis, approvals, and artifact together.
+
+### Event Authority and Watchers
+
+Two rules make the event model trustworthy:
+
+- **The signed event log is authority; Git metadata is only evidence.** Atomic Arch coverage noted spoofed commit author and committer fields, so a change could appear to come from a long-standing maintainer. The registry must therefore record its own signed, append-only `TrustEvent`s keyed on the authenticated `server_actor` (with the authentication method and any step-up assurance), and the UI must privilege that actor over Git author text. Git history is useful evidence; it is never the authority for a trust decision.
+- **A transparency log without watchers is only forensics.** Append-only logs (in the spirit of Go's checksum database and Sigstore's Rekor) make events tamper-evident, but tamper-evidence is not safety. The value comes from active watchers on the log:
+
+```text
+- notify upstream when a package claiming its namespace changes maintainer
+- notify subscribers when a dormant package revives
+- notify reviewers when many packages add the same new dependency
+- notify security responders when "adoption + new dynamic installer" recurs
+```
+
+These watchers are what turn the campaign-correlation goal into early warning rather than after-the-fact reconstruction.
+
+## Worked Policy Examples
+
+Two end-to-end examples make the risk model concrete and serve as seed fixtures for the risk-classification and gate-record specs.
+
+### Atomic-Arch-like update (deny)
+
+```yaml
+package: example
+events:
+  maintainer_changed_within_days: 2
+  dormant_for_days: 420
+delta:
+  new_install_hook: true
+  new_external_package_manager: npm
+  new_dependency: atomic-lockfile
+  package_historical_ecosystems: []
+classification:
+  risk: critical
+  verdict: deny
+  reasons:
+    - newly adopted package (ownership transition cannot carry a behavior change)
+    - new root-time install hook
+    - new cross-ecosystem dynamic installer
+    - dependency not historically related to the package
+required_to_proceed:
+  - security_reviewer
+  - orphan_steward
+  - ecosystem_reviewer: npm
+  - cooldown
+  - disabled lifecycle scripts or a mirrored, pinned dependency source
+```
+
+### Routine version bump after stable maintainership (allow)
+
+```yaml
+package: example
+events:
+  maintainer_lineage_stable_days: 900
+delta:
+  version_changed: true
+  source_url_pattern_unchanged: true
+  source_hash_changed: true
+  build_logic_changed: false
+  dependencies_changed: false
+  install_hooks_changed: false
+  source_tree_anomaly: false
+classification:
+  risk: low
+  verdict: allow
+required:
+  - static_scan_pass
+  - sandbox_build_pass
+  - valid_source_hash
+  - reproducible_build
+```
+
+## Social and Governance Risks
+
+The technical controls fail if the social system around them does. The design should explicitly defend against:
+
+- **Reviewer capture.** A cluster of accounts could vouch for each other and approve risky changes. Require independent trust paths, account age, ecosystem diversity among approvers, and reviewer-reputation loss for approvals later shown to be malicious.
+- **Maintainer exhaustion.** Flooded maintainers ignore the system. The auto-decidable common case, narrow capability diffs instead of raw PKGBUILD diffs, and low-risk fast paths exist to keep human attention scarce where it matters (see [Automation and the Labor Model](#automation-and-the-labor-model)).
+- **Prompt fatigue.** Users click through warnings they see too often. Default clients auto-allow only low-risk established updates, step through medium risk, and hard-block critical patterns unless policy is explicitly changed — so prompts stay rare and meaningful.
+- **False positives.** Hard blocks are reserved for high-confidence indicators only: exact malicious hashes, exact payload signatures, known-bad package versions, and confirmed C2 domains. Heuristics produce soft flags, not blocks, and the indicator feed needs a published appeal-and-correction path.
+- **Privacy.** Package reputation must not depend on invasive install telemetry. Prefer public, low-linkage signals — package age, clean gate history, reproducible-build status, maintainer lineage, incident history — and treat install counts as opt-in or privacy-preserving aggregates used only as supporting evidence (see [Pseudonymity and Participation](#pseudonymity-and-participation)).
+
 ## Minimum Viable Version
 
-The priority order matters. The controls that hold against obfuscation and arms races come first, and the trust, transparency, and UX machinery is layered on top of a foundation that is already safe by construction. A practical first version could implement, in roughly this order:
+The priority order matters. The controls that hold against obfuscation and arms races come first, and the trust, transparency, and UX machinery is layered on top of a foundation that is already safe by construction. Reputation and web-of-trust come last by design: they need a corpus of trustworthy events before they can be computed without being gamed. A practical first version could implement, in roughly this order:
+
+### MVP-0 — AUR safety shim (no server required)
+
+The earliest useful deliverable needs no new infrastructure: a client-side shim over the existing AUR that already removes the most common risk.
+
+1. Local sandboxed build with no real `$HOME` and default-deny network after the fetch phase.
+2. A static scanner for `.install` hooks, `curl | sh`, and `npm`/`pip`/`bun`/`cargo`/`go install` / `git clone` during build or install.
+3. A subscribable known-malicious indicator feed.
+4. Maintainer-change and orphan-adoption warnings.
+
+This is the overlay described in [Adoption Path and Compatibility](#adoption-path-and-compatibility): it ships value before any server-side gate exists.
 
 ### Phase 0 — Containment foundation (highest leverage)
 
@@ -1706,6 +2022,13 @@ The priority order matters. The controls that hold against obfuscation and arms 
 - What is an acceptable false-positive rate for source-tree delta and tarball-vs-VCS diffing?
 - How is the auto-decidable-update KPI measured, and what target is acceptable?
 - How are gate records and risk metadata best surfaced to existing helpers (paru, yay) during incremental migration?
+
+### Next Step: Two Concrete Specs
+
+The most useful next step is to turn this document into two implementable specs, which the [Core Object Model](#core-object-model) and [Worked Policy Examples](#worked-policy-examples) already begin:
+
+1. **Risk Classification Spec** — the exact delta and capability-diff taxonomy, risk tiers, default-deny rules, and required confirmations per tier.
+2. **Gate Record / Analysis Report Schema** — the precise schema a client verifies before install, so independent clients can enforce identical policy.
 
 ## Design Mantra
 
