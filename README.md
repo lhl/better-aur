@@ -22,6 +22,8 @@ This document is intentionally a working draft. The goal is to iterate on the mo
 - [Recipe Format](#recipe-format)
 - [Source, Namespace, and Dependency Provenance](#source-namespace-and-dependency-provenance)
 - [Static and Dynamic Analysis](#static-analysis)
+- [Pre-Distribution Gate](#pre-distribution-gate)
+- [Cloaking and TOCTOU Prevention](#cloaking-and-toctou-prevention)
 - [Global Indicators and Campaign Detection](#global-indicators-denylists-and-campaign-detection)
 - [Update Delta Taxonomy](#update-delta-taxonomy)
 - [Risk Classification](#risk-classification)
@@ -30,6 +32,7 @@ This document is intentionally a working draft. The goal is to iterate on the mo
 - [Build Attestations and Reproducibility](#build-attestations-and-reproducibility)
 - [Install Hooks](#install-hooks)
 - [Client Policy](#client-policy)
+- [User Interface Requirements](#user-interface-requirements)
 - [Governance and Emergency Response](#governance)
 - [Minimum Viable Version](#minimum-viable-version)
 - [Open Questions](#open-questions)
@@ -135,10 +138,11 @@ A hardened community package system should be built as a set of cooperating laye
 3. **Recipe layer** — declarative package metadata, explicit capabilities, pinned sources, dependency manifests, and semantic diffs.
 4. **Analysis layer** — static analysis, sandboxed dynamic analysis, dependency graph analysis, install-hook simulation, artifact diffing, and campaign correlation.
 5. **Review layer** — risk-based confirmations, independent reviewer diversity, provenance checks, and provenpackager-style non-owner fixes.
-6. **Build layer** — disposable builders, reproducibility checks, N-of-M attestations, binary cache signatures, and local sandbox fallback.
-7. **Metadata layer** — TUF-style signed metadata, threshold signatures, expiry, rollback protection, and append-only transparency logs.
-8. **Client policy layer** — helper warnings, deny rules, enterprise policies, local trust roots, and visible package risk/reputation state.
-9. **Response layer** — global malicious-indicator feeds, bad-actor quarantine, package freezes, advisories, rollback guidance, and user notification.
+6. **Pre-distribution gate layer** — signed allow/deny verdicts that bind recipe hash, source hashes, analysis results, approvals, build outputs, and repository metadata before anything becomes installable.
+7. **Build layer** — disposable builders, reproducibility checks, N-of-M attestations, binary cache signatures, and local sandbox fallback.
+8. **Metadata layer** — TUF-style signed metadata, threshold signatures, expiry, rollback protection, and append-only transparency logs.
+9. **Client policy layer** — helper warnings, deny rules, enterprise policies, local trust roots, and visible package risk/reputation state.
+10. **Response layer** — global malicious-indicator feeds, bad-actor quarantine, package freezes, advisories, rollback guidance, and user notification.
 
 This architecture explicitly avoids one brittle trust decision. A package update is accepted only when the right combination of identity, provenance, analysis, review, build evidence, and policy checks agree for that update's risk level.
 
@@ -800,6 +804,71 @@ Automated analysis will not catch everything. It may miss dormant payloads, targ
 
 If automated systems disagree, fail, or cannot analyze a change, the update should be escalated rather than treated as safe.
 
+## Pre-Distribution Gate
+
+A distro-grade system should have a dedicated analyzer/checker gate before an update can be distributed.
+
+The gate should be mandatory for every recipe revision, built artifact, metadata update, and install hook. Nothing should become visible as an installable update until the gate has produced and signed a verdict.
+
+The gate should verify:
+
+- Recipe diff and declared capabilities.
+- Source provenance and source hashes.
+- Upstream signatures or attestations where available.
+- Dependency graph and lockfile changes.
+- Static analysis results.
+- Sandboxed build results.
+- Install, upgrade, and removal hook simulation.
+- Artifact contents and package metadata.
+- Known malicious-indicator matches.
+- Required human approvals for the risk tier.
+- Required build attestations for the risk tier.
+
+The output should be a signed decision record:
+
+```yaml
+package: example
+revision: 1.2.3-1
+recipe_hash: sha256:...
+source_hashes:
+  - sha256:...
+artifact_hash: sha256:...
+risk_tier: medium
+verdict: allow
+checks:
+  static_analysis: pass
+  sandboxed_build: pass
+  install_hook_simulation: none
+  provenance: pass
+  indicators: no_matches
+approvals:
+  - reviewer: alice
+    signature: sig:...
+expires: 2026-07-01T00:00:00Z
+signature: sig:...
+```
+
+Clients should refuse updates without a valid signed gate record unless the user explicitly opts into unsafe development mode.
+
+## Cloaking and TOCTOU Prevention
+
+All recipe inputs, source artifacts, build outputs, analysis results, and distribution metadata should be content-addressed, hashed, signed, and logged.
+
+This prevents cloaking attacks where different users, builders, reviewers, or analyzers see different content.
+
+Rules:
+
+- The analyzer must analyze the exact source hashes that builders use.
+- Builders must build the exact recipe hash that reviewers approved.
+- Distributed packages must match the artifact hash in the signed gate record.
+- Clients must verify repository metadata signatures and artifact hashes before install.
+- Source fetches should prefer immutable commits, signed tags, release artifacts, or content-addressed mirrors.
+- Mutable upstream tags or generated archives should be flagged or mirrored by hash.
+- Any mismatch between analyzed content and distributed content is a hard failure.
+- Transparency logs should make equivocation visible if the repository serves different metadata to different clients.
+
+Signing alone is not enough if the wrong thing is signed. The system must bind together recipe, source, analysis, approvals, build output, and published metadata into one verifiable chain.
+
 ## Global Indicators, Denylists, and Campaign Detection
 
 Known attacks should become global protection immediately.
@@ -1187,11 +1256,38 @@ Review required before installation.
 
 ## Client Policy
 
-Package helpers should enforce user-configurable trust policy.
+Package helpers should enforce user-configurable trust policy with sane safe defaults.
+
+The default user experience should be:
+
+- Safe routine updates can be installed normally when they meet trust thresholds.
+- Untrusted, risky, or unusual updates require explicit user confirmation.
+- Dangerous updates require a forced step-through review and should not be hidden inside bulk upgrades.
+- Confirmed malicious indicators are blocked, not merely warned about.
+- Users can inspect, edit, fork, or adapt recipes easily before building.
+- The UI should explain exactly which threshold failed and what would be required to pass it.
 
 Example policy:
 
 ```yaml
+auto_install:
+  enabled: true
+  min_risk_tier: low
+  max_risk_tier: low
+  min_package_reputation: established
+  min_submitter_reputation: package_contributor
+  min_install_count: 1000
+  min_clean_age_days: 30
+  require_no_failed_thresholds: true
+
+force_step_through:
+  risk_tier_at_least: medium
+  maintainer_changed_within_days: 30
+  dormant_package_revived_after_days: 180
+  source_url_changed: true
+  new_dependency_surface: true
+  package_reputation_below: established
+
 deny:
   unreviewed_high_risk_updates: true
   newly_adopted_packages: true
@@ -1210,9 +1306,12 @@ warn:
   submitter_new_to_package: true
   dependency_reputation_low: true
   campaign_similarity_detected: true
+  install_count_below: 1000
+  clean_age_below_days: 30
 
 require:
   signed_recipe: true
+  signed_gate_record: true
   sandboxed_build: true
   static_analysis_passed: true
   indicator_feed_current: true
@@ -1223,10 +1322,62 @@ require:
 
 Client modes:
 
-- **Permissive** — warn only.
-- **Default** — block clearly dangerous updates unless user overrides.
-- **Strict** — require review, signatures, and sandboxing.
+- **Permissive** — warn only, except confirmed malicious indicators remain blocked.
+- **Default** — auto-install only low-risk, well-established updates; step through anything below threshold; block clearly dangerous updates unless user explicitly overrides.
+- **Strict** — require review, signatures, sandboxing, gate records, and strong package reputation.
 - **Enterprise** — allow only packages matching organization policy.
+
+### Auto-Install Thresholds
+
+Automatic installation should be earned, not assumed.
+
+A package update should be eligible for default auto-install only when it satisfies all required thresholds, such as:
+
+- Low risk tier.
+- Signed recipe revision.
+- Valid signed pre-distribution gate record.
+- No malicious indicator matches.
+- Static analysis passed.
+- Sandboxed build passed.
+- No new install hooks.
+- No new dynamic dependency installers.
+- No source trust-boundary change.
+- Package reputation at or above `established`.
+- Submitter reputation sufficient for the package or ecosystem.
+- Package has enough successful installs, clean aging time, or build attestations.
+- Maintainer lineage is stable.
+
+Install count should be treated as adoption evidence, not proof of safety. It should help only when combined with clean analysis, clean history, and trust metadata.
+
+Anything that fails an auto-install threshold should become an interactive decision, not a silent upgrade.
+
+### Forced Step-Through Review
+
+When an update is below threshold but not hard-blocked, the client should guide the user through a clear review flow:
+
+1. Show the package identity, maintainer lineage, and reputation state.
+2. Show exactly which thresholds failed.
+3. Show the semantic diff: version, source, dependencies, build logic, hooks, capabilities, and artifacts.
+4. Show the automated analysis report and sandbox observations.
+5. Show required approvals and which are missing.
+6. Offer safe actions: skip, pin current version, subscribe for review updates, open recipe, fork/adapt recipe, or build in extra-strict sandbox.
+7. Require an explicit typed confirmation or policy exception for risky installation.
+
+The user should never be asked to approve a vague prompt like "build package?" without context.
+
+### Browsing, Editing, and Adapting Recipes
+
+The client and web UI should make it easy to inspect and adapt recipes:
+
+- Browse package history and maintainer history.
+- Compare proposed updates against the installed version.
+- Open the recipe and install hooks in an editor.
+- Remove or modify suspicious optional behavior locally.
+- Fork a recipe into a personal namespace.
+- Submit an improvement proposal upstream.
+- Save local policy exceptions with expiration dates and explanations.
+
+Power users should be able to take control, but the system should make clear when they are leaving the safe default path.
 
 ## User Interface Requirements
 
@@ -1238,6 +1389,11 @@ Important fields:
 - Recent ownership changes.
 - Dormancy period.
 - Risk score.
+- Package reputation state.
+- Submitter reputation state.
+- Install count and clean-age history.
+- Auto-install eligibility.
+- Failed trust/safety thresholds.
 - Review status.
 - Static analysis report.
 - Install hook presence.
@@ -1245,7 +1401,7 @@ Important fields:
 - Attestation status.
 - Recent suspicious changes.
 
-Good UI should make risky state impossible to miss.
+Good UI should make risky state impossible to miss. It should also make safe state explainable: users should be able to see why an update was auto-installed, why another requires review, and what evidence would move it across the threshold.
 
 ## Governance
 
@@ -1300,8 +1456,10 @@ A practical first version could implement:
 14. Sandboxed local builds without access to the user's home directory.
 15. High-risk update review queue.
 16. OIDC Trusted Publishing for automated package submissions and build attestations.
-17. TUF-style signed repository metadata with expiry and rollback protection.
-18. Append-only transparency log for package events and trust changes.
+17. Mandatory signed pre-distribution gate records for every published update.
+18. Content-addressed hashes binding recipe, source, analysis, build output, and metadata.
+19. TUF-style signed repository metadata with expiry and rollback protection.
+20. Append-only transparency log for package events and trust changes.
 
 ## Open Questions
 
