@@ -2144,9 +2144,3 @@ The next step is to split this working draft into an architecture overview plus 
 1. **Risk Classification Spec** — the phase model, capability and delta taxonomy, risk tiers, default-deny rules, and required confirmations per tier.
 2. **Gate Record Spec** — the object schemas, signatures, hash binding, expiry, and the client verification algorithm.
 3. **Client Policy Spec** — the default, strict, and enterprise modes, warnings, override behavior, and local sandbox requirements.
-
-The document stays in one file until these specs are written.
-
-## Design Mantra
-
-> Make contribution easy. Make trust explicit. Make risky changes visible. Make dangerous behavior require review. Make local compromise harder.
